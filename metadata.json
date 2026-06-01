@@ -1,0 +1,6 @@
+{
+  "name": "MyClubPrime",
+  "description": "Premium hospitality ecosystem connecting travelers, hosts, creators and local experiences through immersive virtual tours, secure bookings, and blockchain-backed guarantees in Ceará, Brazil.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
