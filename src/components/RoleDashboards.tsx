@@ -1,4 +1,14 @@
 import React, { useState } from "react";
+import { auth } from "../lib/firebase";
+import { 
+  addPropertyToDb, 
+  updatePropertyPriceInDb, 
+  updateBookingStatusInDb, 
+  updateBookingDisputeInDb, 
+  addLegalVersionToDb, 
+  archiveOldLegalVersionsInDb, 
+  triggerEmailNotification 
+} from "../lib/dbHelpers";
 import { 
   UserRole, 
   Booking, 
@@ -7,6 +17,7 @@ import {
   ConciergeTicket, 
   LegalTermVersion 
 } from "../types";
+
 import { 
   TrendingUp, 
   Calendar, 
@@ -68,6 +79,25 @@ export default function RoleDashboards({
   // Common states
   const [copiedText, setCopiedText] = useState<string>("");
   const [activeTab, setActiveTab] = useState<string>("overview");
+
+  // New Property Form States (Ceará Host Listings)
+  const [newPropName, setNewPropName] = useState("");
+  const [newPropTagline, setNewPropTagline] = useState("");
+  const [newPropRegion, setNewPropRegion] = useState("Jericoacoara");
+  const [newPropLocation, setNewPropLocation] = useState("");
+  const [newPropPrice, setNewPropPrice] = useState(300);
+  const [newPropDescription, setNewPropDescription] = useState("");
+  const [newPropKuula, setNewPropKuula] = useState("");
+  const [newPropImage, setNewPropImage] = useState("https://images.unsplash.com/photo-1540555700478-4be289fbecef?auto=format&fit=crop&w=1200&q=80");
+  const [uploadPercent, setUploadPercent] = useState(0);
+  const [isUploading, setIsUploading] = useState(false);
+  const [propAddSuccess, setPropAddSuccess] = useState(false);
+
+  // Property Amenities Checkboxes
+  const [isBeachfront, setIsBeachfront] = useState(true);
+  const [isLuxury, setIsLuxury] = useState(true);
+  const [hasPool, setHasPool] = useState(true);
+  const [isPetFriendly, setIsPetFriendly] = useState(false);
 
   // Guest States
   const [selectedBookingForQr, setSelectedBookingForQr] = useState<Booking | null>(bookings[0] || null);
@@ -155,11 +185,25 @@ export default function RoleDashboards({
   };
 
   // Concierge dispute action (Refund or Release)
-  const handleConciergeArbitration = (ticketId: string, action: "Refund" | "Release") => {
+  const handleConciergeArbitration = async (ticketId: string, action: "Refund" | "Release") => {
     const ticket = tickets.find(t => t.id === ticketId);
     if (!ticket) return;
 
     // Search for disputed booking matching guest name or property name
+    const matchingBooking = bookings.find(b => b.propertyName === ticket.propertyName && b.hasActiveDispute);
+    if (matchingBooking) {
+      const pStatus = action === "Refund" ? "Pending" : "Released";
+      const eStatus = action === "Refund" ? "Refunded" : "Fully_Released";
+      await updateBookingDisputeInDb(matchingBooking.id, false, `Arbitrated Status: ${action === "Refund" ? "Refunded to Guest" : "Fully Released to Host"}`, pStatus, eStatus);
+      
+      // Send persistent notification email
+      await triggerEmailNotification(
+        activeEmail, 
+        `Arbitragem Resolvida: Reserva ${matchingBooking.id}`, 
+        `<h1>Arbitragem de Custódia Concluída</h1><p>Resultado: <strong>${action === "Refund" ? "Estornado para o Hóspede" : "Liberado ao Anfitrião"}</strong></p>`
+      );
+    }
+
     setBookings(prev => prev.map(b => {
       if (b.propertyName === ticket.propertyName) {
         return {
@@ -175,20 +219,29 @@ export default function RoleDashboards({
     // Resolve ticket
     setTickets(prev => prev.map(t => {
       if (t.id === ticketId) {
-        return { ...t, status: "Resolved", description: `Arbitrated: ${action} processed successfully.` };
+        return { ...t, status: "Resolved", description: `Arbitrated: ${action} processed successfully in database.` };
       }
       return t;
     }));
   };
 
   // Check in or Release Booking action (Host or Concierge)
-  const handleValidateBooking = (bookingId: string, newState: "Released" | "Progressive_Released") => {
+  const handleValidateBooking = async (bookingId: string, newState: "Released" | "Progressive_Released") => {
+    const eStatus = newState === "Released" ? "Fully_Released" : "Progressive_Released";
+    await updateBookingStatusInDb(bookingId, newState, eStatus);
+
+    await triggerEmailNotification(
+      activeEmail,
+      `Escrow Atualizado: Reserva ${bookingId}`,
+      `<h2>Os fundos de garantias foram transitados com sucesso!</h2><p>Novo status de custódia: <strong>${eStatus}</strong></p>`
+    );
+
     setBookings(prev => prev.map(b => {
       if (b.id === bookingId) {
         return {
           ...b,
           paymentStatus: newState,
-          escrowStatus: newState === "Released" ? "Fully_Released" : "Progressive_Released"
+          escrowStatus: eStatus
         };
       }
       return b;
@@ -196,7 +249,9 @@ export default function RoleDashboards({
   };
 
   // Host calendar update price
-  const handleSavePrice = (propertyId: string) => {
+  const handleSavePrice = async (propertyId: string) => {
+    await updatePropertyPriceInDb(propertyId, customPriceVal);
+
     properties.forEach(p => {
       if (p.id === propertyId) {
         p.pricePerNightUSD = customPriceVal;
@@ -208,7 +263,7 @@ export default function RoleDashboards({
   };
 
   // Admin add new Legal Registry
-  const handleAddLegalRegistry = () => {
+  const handleAddLegalRegistry = async () => {
     if (!newLegalVersion || !newLegalIpfs) return;
     const newVer: LegalTermVersion = {
       version: newLegalVersion,
@@ -217,12 +272,108 @@ export default function RoleDashboards({
       ipfsHash: newLegalIpfs,
       status: "Active"
     };
+
+    await archiveOldLegalVersionsInDb();
+    await addLegalVersionToDb(newVer);
+
     setLegalRegistry(prev => [
       newVer,
       ...prev.map(l => ({ ...l, status: "Archived" as const }))
     ]);
     setNewLegalVersion("");
     setNewLegalIpfs("");
+  };
+
+  // Simulated Base64 Image Upload to mimic Firebase Storage
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setIsUploading(true);
+    setUploadPercent(15);
+
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const interval = setInterval(() => {
+        setUploadPercent(prev => {
+          if (prev >= 100) {
+            clearInterval(interval);
+            setIsUploading(false);
+            setNewPropImage(reader.result as string);
+            return 100;
+          }
+          return prev + 25;
+        });
+      }, 150);
+    };
+    reader.readAsDataURL(file);
+  };
+
+  // Landlord property submission
+  const handleCreateProperty = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newPropName || !newPropLocation || !newPropDescription) {
+      alert("Por favor preencha Nome, Localização e Descrição.");
+      return;
+    }
+
+    const payload: Property = {
+      id: "", // Inner DB mapper handles autogenerated id
+      name: newPropName,
+      tagline: newPropTagline || "Extraordinário refúgio litorâneo privativo de alto padrão",
+      region: newPropRegion as "Jericoacoara" | "Cumbuco" | "Fortaleza",
+      location: newPropLocation,
+      pricePerNightUSD: newPropPrice,
+      pricePerNightUSDT: newPropPrice - 2,
+      pricePerNightPIX: Math.round(newPropPrice * 5.2),
+      imageUrl: newPropImage,
+      virtualTourModelUrl: newPropKuula || "https://kuula.co/share/collection/7K7YV",
+      rating: 5.0,
+      reviewsCount: 1,
+      bedrooms: 4,
+      bathrooms: 4,
+      maxGuests: 8,
+      amenities: ["Air Conditioning", "High-speed Starlink", "Panoramic Deck", "Glass Pool Rim"],
+      galleryUrls: [newPropImage],
+      latitude: -2.7932,
+      longitude: -40.5112,
+      hostId: auth?.currentUser?.uid || "mock-host-id",
+      hostName: auth?.currentUser?.displayName || "Anfitrião Certificado MyClubPrime",
+      hostAvatar: auth?.currentUser?.photoURL || "https://images.unsplash.com/photo-1472099645785-5658abf4ff4e?auto=format&fit=crop&w=150&h=150&q=80",
+      has360Tour: true,
+      isBeachfront,
+      isLuxury,
+      hasPool,
+      isPetFriendly,
+      isRemoteWorkFriendly: true,
+      isFamilyFriendly: true,
+      isCouplesFriendly: true,
+      description: newPropDescription
+    };
+
+    setPropAddSuccess(true);
+
+    try {
+      await addPropertyToDb(payload);
+      await triggerEmailNotification(
+        activeEmail,
+        `Seu Imóvel VIP Foi Cadastrado! - MyClubPrime`,
+        `<h1>Sucesso no Indexador de Imóveis</h1><p>Olá! Seu imóvel <strong>${newPropName}</strong> foi registrado em banco de dados e está ativo na região de ${newPropRegion}.</p><p>Link de Imersão Virtual Kuula: ${payload.virtualTourModelUrl}</p>`
+      );
+    } catch (err) {
+      console.error("Cadastro erro:", err);
+    }
+
+    // Reset values & redirect
+    setTimeout(() => {
+      setNewPropName("");
+      setNewPropTagline("");
+      setNewPropLocation("");
+      setNewPropDescription("");
+      setNewPropKuula("");
+      setPropAddSuccess(false);
+      setActiveTab("calendar"); // returns to price/listing tab
+    }, 2000);
   };
 
 
@@ -295,6 +446,17 @@ export default function RoleDashboards({
                 }`}
               >
                 Pricing & Availability
+              </button>
+              <button 
+                onClick={() => setActiveTab("add-property")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 ${
+                  activeTab === "add-property" 
+                    ? "bg-ocean text-white shadow-md" 
+                    : "bg-white/80 text-ocean border border-white/40 hover:bg-white"
+                }`}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                Cadastrar Imóvel (Kuula 360)
               </button>
               <button 
                 onClick={() => setActiveTab("guarantee")}
@@ -926,6 +1088,188 @@ export default function RoleDashboards({
                   </div>
                 </div>
               </div>
+            </div>
+          )}
+
+          {activeTab === "add-property" && (
+            <div className="liquid-glass p-6 rounded-2xl border border-white/50 space-y-6">
+              <div className="flex items-center gap-2 mb-2">
+                <span className="p-2 bg-turquoise/15 rounded-xl text-turquoise">
+                  <Plus className="h-5 w-5" />
+                </span>
+                <div>
+                  <h3 className="font-display font-bold text-xl text-ocean">Cadastrar Novo Imóvel Ceará</h3>
+                  <p className="text-xs text-gray-500">Expanda a rede conectando vilas luxuosas com Tours Virtuais interativos em tempo real.</p>
+                </div>
+              </div>
+
+              <form onSubmit={handleCreateProperty} className="grid grid-cols-1 md:grid-cols-2 gap-6 text-xs text-ocean">
+                {/* Form left inputs */}
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Nome do Imóvel *</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="Ex: Villa Sunset Glass Palace Jeri"
+                      value={newPropName}
+                      onChange={(e) => setNewPropName(e.target.value)}
+                      className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Frase de Efeito (Tagline)</label>
+                    <input 
+                      type="text" 
+                      placeholder="Ex: Piscina de vidro suspensa de frente para a duna sul"
+                      value={newPropTagline}
+                      onChange={(e) => setNewPropTagline(e.target.value)}
+                      className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Região Litorânea</label>
+                      <select 
+                        value={newPropRegion}
+                        onChange={(e) => setNewPropRegion(e.target.value)}
+                        className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                      >
+                        <option value="Jericoacoara">Jericoacoara</option>
+                        <option value="Cumbuco">Cumbuco</option>
+                        <option value="Fortaleza">Fortaleza</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Preço Base por Noite (USD) *</label>
+                      <input 
+                        type="number" 
+                        required
+                        min={50}
+                        value={newPropPrice}
+                        onChange={(e) => setNewPropPrice(Number(e.target.value))}
+                        className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Endereço Físico / Coordenadas *</label>
+                    <input 
+                      type="text" 
+                      required
+                      placeholder="Ex: Av. Beira Mar, S/N - Jericoacoara, Ceará"
+                      value={newPropLocation}
+                      onChange={(e) => setNewPropLocation(e.target.value)}
+                      className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Link de Compartilhamento Kuula 360 *</label>
+                    <input 
+                      type="url" 
+                      placeholder="Ex: https://kuula.co/share/collection/7K7YV"
+                      value={newPropKuula}
+                      onChange={(e) => setNewPropKuula(e.target.value)}
+                      className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise font-mono"
+                    />
+                    <span className="text-[10px] text-gray-400 mt-1 block">Insira um link Kuula 360 válido para embutir na visualização de reservas do hóspede.</span>
+                  </div>
+                </div>
+
+                {/* Form right inputs (Upload and amenities) */}
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1">Descrição Premium do Imóvel *</label>
+                    <textarea 
+                      required
+                      rows={4}
+                      placeholder="Descreva a arquitetura Liquid Glass, varanda, amenidades luxuosas e localização..."
+                      value={newPropDescription}
+                      onChange={(e) => setNewPropDescription(e.target.value)}
+                      className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                    />
+                  </div>
+
+                  {/* Image Selector / Firebase Storage Upload simulation */}
+                  <div className="bg-white/50 p-4 rounded-xl border border-dashed border-gray-200">
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-1 flex items-center gap-1.5">
+                      <Upload className="h-4.5 w-4.5 text-turquoise" />
+                      Upload de Imagem (Firebase Storage)
+                    </label>
+
+                    <div className="flex items-center gap-4 mt-2">
+                      <img src={newPropImage} className="w-16 h-16 rounded-xl object-cover border border-gray-200 shadow-sm" alt="Preview" />
+                      
+                      <div className="flex-1">
+                        <input 
+                          type="file" 
+                          accept="image/*"
+                          onChange={handleImageUpload}
+                          className="w-full text-[11px] file:mr-3 file:py-1 file:px-2.5 file:rounded file:border-0 file:text-[10px] file:font-semibold file:bg-turquoise/10 file:text-turquoise cursor-pointer"
+                        />
+                        <p className="text-[9px] text-gray-400 mt-1">PNG, JPG de alta resolução. Convertido automaticamente e indexado no banco.</p>
+                      </div>
+                    </div>
+
+                    {isUploading && (
+                      <div className="mt-3 space-y-1">
+                        <div className="h-2 w-full bg-gray-100 rounded-full overflow-hidden">
+                          <div className="h-full bg-turquoise transition-all duration-300" style={{ width: `${uploadPercent}%` }}></div>
+                        </div>
+                        <p className="text-[9px] text-turquoise font-mono font-bold animate-pulse">Enviando para bucket de mídia: {uploadPercent}% ...</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Checkboxes parameters */}
+                  <div>
+                    <label className="block text-[11px] font-bold text-ocean uppercase mb-2">Características & Parâmetros</label>
+                    <div className="grid grid-cols-2 gap-3 text-[11px]">
+                      <label className="flex items-center gap-2 cursor-pointer bg-white/40 p-2 rounded-lg border border-white/50 select-none">
+                        <input type="checkbox" checked={isBeachfront} onChange={(e) => setIsBeachfront(e.target.checked)} className="rounded accent-turquoise cursor-pointer h-4 w-4" />
+                        <span>🌊 Frente ao mar</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 cursor-pointer bg-white/40 p-2 rounded-lg border border-white/50 select-none">
+                        <input type="checkbox" checked={isLuxury} onChange={(e) => setIsLuxury(e.target.checked)} className="rounded accent-turquoise cursor-pointer h-4 w-4" />
+                        <span>💎 Luxo Prime</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 cursor-pointer bg-white/40 p-2 rounded-lg border border-white/50 select-none">
+                        <input type="checkbox" checked={hasPool} onChange={(e) => setHasPool(e.target.checked)} className="rounded accent-turquoise cursor-pointer h-4 w-4" />
+                        <span>🏊 Piscina Privada</span>
+                      </label>
+
+                      <label className="flex items-center gap-2 cursor-pointer bg-white/40 p-2 rounded-lg border border-white/50 select-none">
+                        <input type="checkbox" checked={isPetFriendly} onChange={(e) => setIsPetFriendly(e.target.checked)} className="rounded accent-turquoise cursor-pointer h-4 w-4" />
+                        <span>🐾 Aceita Animais</span>
+                      </label>
+                    </div>
+                  </div>
+
+                  {/* Submit state */}
+                  <div className="pt-2 flex gap-4 items-center">
+                    <button
+                      type="submit"
+                      className="px-6 py-3 bg-gradient-to-r from-ocean to-[#0E356A] hover:bg-[#0E356A] text-white font-bold rounded-xl text-xs flex items-center gap-2 transition-all shadow-md focus:outline-none"
+                    >
+                      <Plus className="h-4 w-4" />
+                      Publicar Imóvel em Produção
+                    </button>
+                    
+                    {propAddSuccess && (
+                      <span className="text-turquoise font-bold flex items-center gap-1 font-sans animate-bounce">
+                        <CheckCircle2 className="h-4 w-4" /> Salvo no Firestore!
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </form>
             </div>
           )}
         </div>

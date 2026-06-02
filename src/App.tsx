@@ -1,4 +1,22 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
+import { auth, firebaseAvailable } from "./lib/firebase";
+import { 
+  signInWithEmailAndPassword, 
+  createUserWithEmailAndPassword, 
+  signOut, 
+  onAuthStateChanged,
+  updateProfile
+} from "firebase/auth";
+import { 
+  saveUserProfile, 
+  fetchUserProfile, 
+  subscribeToBookings, 
+  subscribeToProperties, 
+  subscribeToTickets, 
+  subscribeToLegal,
+  addBookingToDb,
+  triggerEmailNotification
+} from "./lib/dbHelpers";
 import { 
   UserRole, 
   Property, 
@@ -52,10 +70,220 @@ export default function App() {
   const [filterPool, setFilterPool] = useState<boolean>(false);
   const [filterPetFriendly, setFilterPetFriendly] = useState<boolean>(false);
 
-  // Dynamic lists shared across dashboard panels
+  // Subscription Dynamic collections
+  const [properties, setProperties] = useState<Property[]>(masterProperties);
   const [bookings, setBookings] = useState<Booking[]>(initialBookings);
   const [tickets, setTickets] = useState<ConciergeTicket[]>(initialConciergeTickets);
   const [legalRegistry, setLegalRegistry] = useState<LegalTermVersion[]>(initialLegalRegistry);
+
+  // Auth States
+  const [currentUser, setCurrentUser] = useState<any>(null);
+  const [authModalOpen, setAuthModalOpen] = useState<boolean>(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authEmail, setAuthEmail] = useState<string>("");
+  const [authPassword, setAuthPassword] = useState<string>("");
+  const [authName, setAuthName] = useState<string>("");
+  const [authRole, setAuthRole] = useState<UserRole>(UserRole.GUEST);
+  const [authError, setAuthError] = useState<string>("");
+  const [authSuccessMsg, setAuthSuccessMsg] = useState<string>("");
+
+  // Mercado Pago PIX Checkout States
+  const [mpPixModalOpen, setMpPixModalOpen] = useState<boolean>(false);
+  const [mpPixData, setMpPixData] = useState<{
+    qrCodeUrl: string;
+    copyPasteCode: string;
+    amount: number;
+    bookingId: string;
+  } | null>(null);
+  const [mpPixLoading, setMpPixLoading] = useState<boolean>(false);
+
+  // Email notifications monitors
+  const [emailLogsOpen, setEmailLogsOpen] = useState<boolean>(false);
+  const [activeOutboundEmails, setActiveOutboundEmails] = useState<any[]>([]);
+
+  useEffect(() => {
+    // 1. Auth state monitor
+    const unsubAuth = onAuthStateChanged(auth, async (user) => {
+      if (user) {
+        setCurrentUser(user);
+        const profile: any = await fetchUserProfile(user.uid);
+        if (profile?.role) {
+          setCurrentRole(profile.role as UserRole);
+        }
+      } else {
+        setCurrentUser(null);
+      }
+    });
+
+    // 2. subscribe to Properties
+    const unsubProps = subscribeToProperties((updatedProps) => {
+      if (updatedProps.length > 0) {
+        // Merge presets with Firestore custom properties
+        const merged = [
+          ...masterProperties.filter(mp => !updatedProps.some(up => up.id === mp.id)),
+          ...updatedProps
+        ];
+        setProperties(merged);
+        
+        // Auto update selected view if needed
+        const stillExists = merged.find(p => p.id === selectedProperty.id);
+        if (stillExists) {
+          setSelectedProperty(stillExists);
+        } else if (merged.length > 0) {
+          setSelectedProperty(merged[0]);
+        }
+      }
+    });
+
+    // 5. subscribe to Legal Registry versions
+    const unsubLegal = subscribeToLegal((updatedLegal) => {
+      if (updatedLegal.length > 0) {
+        setLegalRegistry(updatedLegal);
+      }
+    });
+
+    // 6. Poll transactional email notification stack
+    const fetchEmailLogs = async () => {
+      try {
+        const res = await fetch("/api/notifications/logs");
+        const data = await res.json();
+        if (data?.logs) {
+          setActiveOutboundEmails(data.logs);
+        }
+      } catch (err) {
+        console.warn("SMTP simulation offline during build boot:", err);
+      }
+    };
+    fetchEmailLogs();
+    const emailPoller = setInterval(fetchEmailLogs, 4000);
+
+    return () => {
+      unsubAuth();
+      unsubProps();
+      unsubLegal();
+      clearInterval(emailPoller);
+    };
+  }, [selectedProperty.id]);
+
+  // Subscriptions requiring active authentication session
+  useEffect(() => {
+    if (!currentUser) return;
+
+    // 3. subscribe to Bookings
+    const unsubBookings = subscribeToBookings((updatedBookings) => {
+      if (updatedBookings.length > 0) {
+        setBookings(updatedBookings);
+      }
+    });
+
+    // 4. subscribe to Tickets
+    const unsubTickets = subscribeToTickets((updatedTickets) => {
+      if (updatedTickets.length > 0) {
+        setTickets(updatedTickets);
+      }
+    });
+
+    return () => {
+      unsubBookings();
+      unsubTickets();
+    };
+  }, [currentUser]);
+
+  // Auth Submit Login or Registration
+  const handleAuthSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    setAuthSuccessMsg("");
+
+    if (!authEmail || !authPassword) {
+      setAuthError("Forneça e-mail e senha para prosseguir.");
+      return;
+    }
+
+    try {
+      if (authMode === "register") {
+        if (!authName) {
+          setAuthError("Você deve preencher seu nome completo.");
+          return;
+        }
+
+        let userObj;
+        if (firebaseAvailable) {
+          const credentials = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+          userObj = credentials.user;
+          await updateProfile(userObj, { displayName: authName });
+          await saveUserProfile(userObj.uid, authName, authEmail, authRole);
+        } else {
+          // Simulator
+          userObj = { uid: `sim-${Date.now()}`, email: authEmail, displayName: authName };
+        }
+
+        setAuthSuccessMsg("Sua conta VIP foi gerada com sucesso! ✅");
+        setCurrentRole(authRole);
+        setCurrentUser(userObj);
+
+        await triggerEmailNotification(
+          authEmail,
+          "Bons Ventos! Conta Criada no MyClubPrime",
+          `<h1>Bem-vindo ao ecossistema, ${authName}!</h1><p>Sua credencial de <strong>${authRole}</strong> foi autorizada e gravada no banco de dados.</p>`
+        );
+
+        setTimeout(() => {
+          setAuthModalOpen(false);
+          setAuthEmail("");
+          setAuthPassword("");
+          setAuthName("");
+        }, 1500);
+
+      } else {
+        // Login mode
+        let loggedUser;
+        if (firebaseAvailable) {
+          const credentials = await signInWithEmailAndPassword(auth, authEmail, authPassword);
+          loggedUser = credentials.user;
+          const profile: any = await fetchUserProfile(loggedUser.uid);
+          if (profile?.role) {
+            setCurrentRole(profile.role as UserRole);
+          }
+        } else {
+          // local match simulated
+          loggedUser = { uid: "sim-levi-123", email: authEmail, displayName: "Levi Gold" };
+          setCurrentUser(loggedUser);
+          if (authEmail.includes("host") || authEmail.includes("anfitriao")) {
+            setCurrentRole(UserRole.HOST);
+          } else if (authEmail.includes("admin")) {
+            setCurrentRole(UserRole.ADMINISTRATOR);
+          } else {
+            setCurrentRole(UserRole.GUEST);
+          }
+        }
+
+        setAuthSuccessMsg("Autenticado com sucesso! Carregando...");
+
+        await triggerEmailNotification(
+          authEmail,
+          "Alerta de Novo Login - MyClubPrime Security",
+          `<p>Detectamos um novo login para a sua conta <strong>${authEmail}</strong> em 2026.</p>`
+        );
+
+        setTimeout(() => {
+          setAuthModalOpen(false);
+          setAuthEmail("");
+          setAuthPassword("");
+        }, 1000);
+      }
+    } catch (err: any) {
+      setAuthError(err?.message || "Erro na autenticação. Verifique os dados.");
+    }
+  };
+
+  const handleSignOut = async () => {
+    if (firebaseAvailable) {
+      await signOut(auth);
+    }
+    setCurrentUser(null);
+    setCurrentRole(UserRole.GUEST);
+  };
 
   // AI Assistant Chat Suggestion State
   const [aiPrompt, setAiPrompt] = useState<string>("");
@@ -123,50 +351,138 @@ export default function App() {
   };
 
   // Checkout Execution
-  const handleExecuteCheckout = (e: React.FormEvent) => {
+  const handleExecuteCheckout = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!checkoutBookingProperty || !termsAccepted) return;
 
     setIsProcessingCheckout(true);
+    const calculated = calculateFees(checkoutBookingProperty);
+    const randomId = `RES-${Math.floor(100000 + Math.random() * 900000)}`;
+    const contractStamp = `poly_0x${Math.random().toString(16).substr(2, 40)}`;
+
+    const newReservation: Booking = {
+      id: randomId,
+      propertyId: checkoutBookingProperty.id,
+      propertyName: checkoutBookingProperty.name,
+      propertyImage: checkoutBookingProperty.imageUrl,
+      guestId: currentUser?.uid || "guest-levi-01",
+      guestName: currentUser?.displayName || "Levi Gold",
+      hostId: checkoutBookingProperty.hostId,
+      checkIn: checkoutCheckIn,
+      checkOut: checkoutCheckOut,
+      totalAmountUSD: calculated.finalAmount,
+      totalAmountFiatBRL: Math.round(calculated.finalAmount * 5.2),
+      paymentMethod: checkoutPaymentMethod,
+      paymentStatus: checkoutPaymentMethod === "PIX" ? "Pending" : (checkoutPaymentMethod === "USDT Polygon" ? "Escrow_Locked" : "Paid"),
+      escrowStatus: checkoutPaymentMethod === "PIX" ? "Inactive" : (checkoutPaymentMethod === "USDT Polygon" ? "Locked" : "Progressive_Released"),
+      securityGuaranteeStamp: contractStamp,
+      blockchainTxHash: `0x${Math.random().toString(16).substr(2, 64)}`,
+      checkInQrCode: `MYCLUBPRIME-${randomId}`,
+      hasActiveDispute: false
+    };
+
+    if (checkoutPaymentMethod === "PIX") {
+      setMpPixLoading(true);
+      try {
+        const response = await fetch("/api/mp/pix", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            amount: newReservation.totalAmountFiatBRL,
+            bookingId: randomId,
+            guestEmail: currentUser?.email || "leviethereum@gmail.com"
+          })
+        });
+        const pixRes = await response.json();
+        
+        // Open Pix Modal with Mercado Pago parameters
+        setMpPixData({
+          qrCodeUrl: pixRes.qrCodeUrl,
+          copyPasteCode: pixRes.copyPasteCode,
+          amount: pixRes.amount,
+          bookingId: pixRes.bookingId
+        });
+        
+        setMpPixModalOpen(true);
+      } catch (err) {
+        console.error("Error creating PIX Mercado Pago order:", err);
+      } finally {
+        setMpPixLoading(false);
+        setIsProcessingCheckout(false);
+      }
+      return;
+    }
+
+    // Otherwise, complete card or USDT reservation successfully directly
+    await addBookingToDb(newReservation);
+    setBookings(prev => [newReservation, ...prev]);
+    setNewBookingAuditStamp(contractStamp);
+    setCheckoutSuccess(true);
+    setIsProcessingCheckout(false);
+
+    await triggerEmailNotification(
+      currentUser?.email || "leviethereum@gmail.com",
+      "Confirmação de Reserva de Luxo - MyClubPrime Escrow",
+      `<h1>Sua hospedagem VIP está confirmada!</h1><p>Vila: <strong>${checkoutBookingProperty.name}</strong></p><p>Check-in: ${checkoutCheckIn} e Check-out: ${checkoutCheckOut}</p><p>O valor de <strong>$${calculated.finalAmount} USD</strong> está guardado sob a custódia MyClubPrime Legal Escrow e será progressivamente repassado ao proprietário.</p>`
+    );
+
+    // Scroll to dashboards so user can instantly see their booking
     setTimeout(() => {
-      const calculated = calculateFees(checkoutBookingProperty);
-      const randomId = `RES-${Math.floor(100000 + Math.random() * 900000)}`;
-      const contractStamp = `poly_0x${Math.random().toString(16).substr(2, 40)}`;
+      const dashboardElement = document.getElementById("dashboards-section");
+      if (dashboardElement) {
+        dashboardElement.scrollIntoView({ behavior: "smooth" });
+      }
+    }, 1000);
+  };
 
-      const newReservation: Booking = {
-        id: randomId,
-        propertyId: checkoutBookingProperty.id,
-        propertyName: checkoutBookingProperty.name,
-        propertyImage: checkoutBookingProperty.imageUrl,
-        guestId: "guest-levi-01",
-        guestName: "Levi Gold",
-        hostId: checkoutBookingProperty.hostId,
-        checkIn: checkoutCheckIn,
-        checkOut: checkoutCheckOut,
-        totalAmountUSD: calculated.finalAmount,
-        totalAmountFiatBRL: Math.round(calculated.finalAmount * 5.2),
-        paymentMethod: checkoutPaymentMethod,
-        paymentStatus: checkoutPaymentMethod === "USDT Polygon" ? "Escrow_Locked" : "Paid",
-        escrowStatus: checkoutPaymentMethod === "USDT Polygon" ? "Locked" : "Progressive_Released",
-        securityGuaranteeStamp: contractStamp,
-        blockchainTxHash: `0x${Math.random().toString(16).substr(2, 64)}`,
-        checkInQrCode: `MYCLUBPRIME-${randomId}`,
-        hasActiveDispute: false
-      };
+  const handleConfirmPixPayment = async () => {
+    if (!mpPixData || !checkoutBookingProperty) return;
+    
+    // Create actual reservation item
+    const randomId = mpPixData.bookingId;
+    const contractStamp = `poly_0x${Math.random().toString(16).substr(2, 40)}`;
 
-      setBookings(prev => [newReservation, ...prev]);
-      setNewBookingAuditStamp(contractStamp);
-      setCheckoutSuccess(true);
-      setIsProcessingCheckout(false);
+    const paidReservation: Booking = {
+      id: randomId,
+      propertyId: checkoutBookingProperty.id,
+      propertyName: checkoutBookingProperty.name,
+      propertyImage: checkoutBookingProperty.imageUrl,
+      guestId: currentUser?.uid || "guest-levi-01",
+      guestName: currentUser?.displayName || "Levi Gold",
+      hostId: checkoutBookingProperty.hostId,
+      checkIn: checkoutCheckIn,
+      checkOut: checkoutCheckOut,
+      totalAmountUSD: checkoutBookingProperty.pricePerNightUSD * 5, // Estimated nights
+      totalAmountFiatBRL: mpPixData.amount,
+      paymentMethod: "PIX",
+      paymentStatus: "Paid",
+      escrowStatus: "Locked", // becomes locked in escrow for safety
+      securityGuaranteeStamp: contractStamp,
+      blockchainTxHash: `0x${Math.random().toString(16).substr(2, 64)}`,
+      checkInQrCode: `MYCLUBPRIME-${randomId}`,
+      hasActiveDispute: false
+    };
 
-      // Scroll to dashboards so user can instantly see their booking
-      setTimeout(() => {
-        const dashboardElement = document.getElementById("dashboards-section");
-        if (dashboardElement) {
-          dashboardElement.scrollIntoView({ behavior: "smooth" });
-        }
-      }, 1000);
-    }, 1500);
+    await addBookingToDb(paidReservation);
+    setBookings(prev => [paidReservation, ...prev]);
+    setNewBookingAuditStamp(contractStamp);
+    setMpPixModalOpen(false);
+    setCheckoutSuccess(true);
+
+    await triggerEmailNotification(
+      currentUser?.email || "leviethereum@gmail.com",
+      "Pagamento PIX Confirmado! - MyClubPrime Escrow",
+      `<h1>Mercado Pago PIX Recebido de R$ ${mpPixData.amount} BRL!</h1><h2>Sua hospedagem em ${checkoutBookingProperty.name} está garantida com cobertura de 1.5M USDT de proteção financeira.</h2><p>Código da Reserva: ${randomId}</p>`
+    );
+
+    setTimeout(() => {
+      const dashboardElement = document.getElementById("dashboards-section");
+      if (dashboardElement) {
+        dashboardElement.scrollIntoView({ behavior: "smooth" });
+      }
+    }, 1000);
   };
 
   // Submit Review
@@ -244,23 +560,69 @@ export default function App() {
             </div>
           </div>
 
-          {/* Role Changer Quick Dock Panel */}
-          <div className="flex items-center gap-2 bg-white/90 p-1.5 rounded-full border border-white/50 shadow-md">
-            <span className="text-[9px] font-bold text-gray-400 pl-2 uppercase font-mono">Profile Switch:</span>
-            <div className="flex gap-1">
-              {(["Guest", "Host", "Creator", "Concierge", "Administrator"] as UserRole[]).map((role) => (
+          {/* Role Changer & VIP Login Dock */}
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2 bg-white/95 p-1.5 rounded-full border border-white/50 shadow-md">
+              <span className="text-[9px] font-bold text-gray-400 pl-2 uppercase font-mono">Profile Switch:</span>
+              <div className="flex gap-1">
+                {(["Guest", "Host", "Creator", "Concierge", "Administrator"] as UserRole[]).map((role) => (
+                  <button
+                    key={role}
+                    onClick={() => setCurrentRole(role)}
+                    className={`px-3 py-1 rounded-full text-[10px] font-bold transition-all ${
+                      currentRole === role
+                        ? "bg-gradient-to-r from-ocean to-[#0E356A] text-white shadow-sm scale-105"
+                        : "text-gray-500 hover:text-ocean hover:bg-slate-150"
+                    }`}
+                  >
+                    {role}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Notification and Authentication commands */}
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setEmailLogsOpen(true)}
+                className="p-2 rounded-xl bg-white/85 text-ocean border border-white/40 hover:bg-white text-xs font-semibold flex items-center justify-center gap-1.5 shadow-sm relative cursor-pointer"
+                title="Servidor de Logs de Notificações Enviadas"
+              >
+                <HelpCircle className="h-4.5 w-4.5 text-turquoise" />
+                {activeOutboundEmails.length > 0 && (
+                  <span className="absolute -top-1.5 -right-1.5 h-4.5 w-4.5 bg-red-500 text-[8px] font-bold text-white rounded-full flex items-center justify-center animate-bounce">
+                    {activeOutboundEmails.length}
+                  </span>
+                )}
+              </button>
+
+              {currentUser ? (
+                <div className="flex items-center gap-2 bg-ocean/10 border border-ocean/20 p-1 pr-2.5 rounded-full shadow-inner">
+                  <span className="h-6.5 w-6.5 rounded-full bg-ocean text-white text-[10px] flex items-center justify-center font-bold font-display uppercase">
+                    {currentUser.displayName ? currentUser.displayName.charAt(0) : "U"}
+                  </span>
+                  <div className="text-left text-[10px] hidden sm:block max-w-[100px] truncate">
+                    <p className="font-bold text-ocean leading-tight">{currentUser.displayName || "VIP Member"}</p>
+                    <p className="text-gray-400 leading-none text-[8px] truncate">{currentUser.email}</p>
+                  </div>
+                  <button 
+                    onClick={handleSignOut}
+                    className="text-[9px] font-bold text-red-500 hover:text-red-700 underline focus:outline-none ml-1 bg-transparent border-0 cursor-pointer"
+                  >
+                    Sair
+                  </button>
+                </div>
+              ) : (
                 <button
-                  key={role}
-                  onClick={() => setCurrentRole(role)}
-                  className={`px-3 py-1 rounded-full text-[10px] font-bold transition-all ${
-                    currentRole === role
-                      ? "bg-gradient-to-r from-ocean to-[#0E356A] text-white shadow-sm scale-105"
-                      : "text-gray-500 hover:text-ocean hover:bg-slate-150"
-                  }`}
+                  onClick={() => {
+                    setAuthMode("login");
+                    setAuthModalOpen(true);
+                  }}
+                  className="px-3.5 py-1.5 bg-gradient-to-r from-turquoise to-[#0dad9b] hover:from-[#0dad9b] hover:to-turquoise text-white text-[11px] font-bold rounded-xl shadow-md cursor-pointer hover:shadow-lg hover:scale-105 transition-all"
                 >
-                  {role}
+                  Acesso VIP
                 </button>
-              ))}
+              )}
             </div>
           </div>
 
@@ -911,7 +1273,7 @@ export default function App() {
           {/* Sub-components renderer */}
           <RoleDashboards 
             currentRole={currentRole}
-            properties={masterProperties}
+            properties={properties}
             bookings={bookings}
             setBookings={setBookings}
             campaigns={mockCreatorCampaigns}
@@ -919,7 +1281,7 @@ export default function App() {
             setTickets={setTickets}
             legalRegistry={legalRegistry}
             setLegalRegistry={setLegalRegistry}
-            activeEmail="leviethereum@gmail.com"
+            activeEmail={currentUser?.email || "leviethereum@gmail.com"}
           />
 
         </div>
@@ -950,6 +1312,272 @@ export default function App() {
           </p>
         </div>
       </footer>
+
+      {/* ==================== 1. FIREBASE AUTH MODAL ==================== */}
+      {authModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-md bg-slate-950/40">
+          <div className="liquid-glass border border-white/50 p-7 rounded-3xl w-full max-w-md text-ocean space-y-5 shadow-2xl relative">
+            <button 
+              onClick={() => setAuthModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-ocean text-sm font-bold bg-white/50 h-8 w-8 rounded-full flex items-center justify-center border border-white/60 cursor-pointer"
+            >
+              ✕
+            </button>
+
+            <div className="text-center space-y-1">
+              <span className="text-[9px] font-black tracking-widest text-[#d4af37] bg-gold/10 px-2 py-1 rounded border border-gold/20 uppercase">
+                Acesso VIP MyClubPrime
+              </span>
+              <h3 className="font-display font-bold text-2xl text-ocean mt-2">
+                {authMode === "login" ? "Entrar na sua Conta" : "Criar Credencial de Membro"}
+              </h3>
+              <p className="text-xs text-gray-500">Acesse ou registre-se na infraestrutura operacional de turismo premium.</p>
+            </div>
+
+            {authError && (
+              <div className="p-3 bg-red-100 border border-red-200 text-red-800 text-xs rounded-xl flex items-center gap-1.5 font-sans">
+                <AlertCircle className="h-4 w-4" />
+                <span>{authError}</span>
+              </div>
+            )}
+
+            {authSuccessMsg && (
+              <div className="p-3 bg-emerald-100 border border-emerald-200 text-emerald-800 text-xs rounded-xl flex items-center gap-1.5 font-sans">
+                <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                <span>{authSuccessMsg}</span>
+              </div>
+            )}
+
+            <form onSubmit={handleAuthSubmit} className="space-y-4 text-xs">
+              {authMode === "register" && (
+                <div>
+                  <label className="block text-[10px] font-bold text-ocean uppercase mb-1">Nome Completo *</label>
+                  <input 
+                    type="text" 
+                    required 
+                    placeholder="Ex: Levi Goldstein" 
+                    value={authName}
+                    onChange={(e) => setAuthName(e.target.value)}
+                    className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                  />
+                </div>
+              )}
+
+              <div>
+                <label className="block text-[10px] font-bold text-ocean uppercase mb-1">E-mail Corporativo o Pessoal *</label>
+                <input 
+                  type="email" 
+                  required 
+                  placeholder="Ex: leviethereum@gmail.com" 
+                  value={authEmail}
+                  onChange={(e) => setAuthEmail(e.target.value)}
+                  className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                />
+              </div>
+
+              <div>
+                <label className="block text-[10px] font-bold text-ocean uppercase mb-1">Senha de Acesso VIP *</label>
+                <input 
+                  type="password" 
+                  required 
+                  placeholder="••••••••••••••" 
+                  value={authPassword}
+                  onChange={(e) => setAuthPassword(e.target.value)}
+                  className="w-full text-xs px-3.5 py-2.5 bg-white border border-gray-150 rounded-xl focus:outline-none focus:border-turquoise"
+                />
+              </div>
+
+              {authMode === "register" && (
+                <div>
+                  <label className="block text-[10px] font-bold text-ocean uppercase mb-2">Perfil de Conectividade *</label>
+                  <div className="grid grid-cols-2 gap-3 text-center text-[11px]">
+                    <button 
+                      type="button"
+                      onClick={() => setAuthRole(UserRole.GUEST)}
+                      className={`p-2.5 rounded-xl border font-bold transition-all ${
+                        authRole === UserRole.GUEST 
+                          ? "bg-ocean text-white border-ocean" 
+                          : "bg-white text-gray-500 border-gray-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      ✈️ Hóspede VIP
+                    </button>
+                    <button 
+                      type="button"
+                      onClick={() => setAuthRole(UserRole.HOST)}
+                      className={`p-2.5 rounded-xl border font-bold transition-all ${
+                        authRole === UserRole.HOST 
+                          ? "bg-ocean text-white border-ocean" 
+                          : "bg-white text-gray-500 border-gray-200 hover:bg-slate-50"
+                      }`}
+                    >
+                      🏡 Anfitrião Prime
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <button
+                type="submit"
+                className="w-full py-3 bg-gradient-to-r from-ocean to-[#0E356A] text-white hover:opacity-90 font-bold rounded-xl text-xs flex justify-center items-center gap-1.5 transition-all shadow-md cursor-pointer mt-2"
+              >
+                {authMode === "login" ? "Entrar Secretamente" : "Registrar Conta e Cadastrar Perfis"}
+                <ArrowRight className="h-4 w-4" />
+              </button>
+            </form>
+
+            <div className="text-center pt-2">
+              <button 
+                onClick={() => setAuthMode(authMode === "login" ? "register" : "login")}
+                className="text-[11px] text-turquoise font-bold hover:underline bg-transparent border-0 cursor-pointer focus:outline-none"
+              >
+                {authMode === "login" ? "Não possui conta? Registre-se agora ➜" : "Já é membro cadastrado? Efetue o Login ➜"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== 2. MERCADO PAGO PIX GATEWAY MODAL ==================== */}
+      {mpPixModalOpen && mpPixData && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center px-4 backdrop-blur-md bg-slate-950/40">
+          <div className="liquid-glass border border-white/50 p-7 rounded-3xl w-full max-w-sm text-ocean space-y-5 shadow-2xl text-center relative">
+            <button 
+              onClick={() => setMpPixModalOpen(false)}
+              className="absolute top-4 right-4 text-gray-400 hover:text-ocean text-sm font-bold bg-white/50 h-8 w-8 rounded-full flex items-center justify-center border border-white/60 cursor-pointer"
+            >
+              ✕
+            </button>
+
+            <div className="space-y-1">
+              <div className="inline-block bg-[#009EE3]/15 text-[#009EE3] text-[9px] font-black px-2 py-1.5 rounded uppercase border border-[#009EE3]/25 font-mono">
+                MERCADO PAGO PIX PROXY
+              </div>
+              <h3 className="font-display font-medium text-lg mt-2 text-ocean">Finalize sua Payout-Escrow</h3>
+              <p className="text-[11px] text-gray-500 leading-normal">
+                Pague o PIX dinâmico abaixo para que seu depósito de custódia seja bloqueado pela MyClubPrime no banco de dados.
+              </p>
+            </div>
+
+            {/* QR block code */}
+            <div className="bg-white p-3 rounded-2xl inline-block shadow-inner mx-auto border border-gray-100">
+              <img src={mpPixData.qrCodeUrl} className="w-[180px] h-[180px] object-cover" alt="MP PIX Code" />
+            </div>
+
+            {/* Total value indicators */}
+            <div className="bg-white/50 p-3 rounded-xl border border-white max-w-xs mx-auto">
+              <span className="text-[10px] text-gray-400 font-bold uppercase block">Valor Total Solicitado</span>
+              <strong className="text-xl font-mono text-ocean font-black">R$ {mpPixData.amount.toLocaleString()} BRL</strong>
+              <span className="text-[8px] text-turquoise font-bold block mt-0.5">Sem taxas bancárias externas (PIX garantido)</span>
+            </div>
+
+            {/* Pix copy paste string text */}
+            <div className="space-y-2 text-left text-xs">
+              <label className="block text-[10px] font-bold text-gray-400 uppercase">Copia e Cola Pix *</label>
+              <div className="flex gap-2">
+                <input 
+                  type="text" 
+                  readOnly 
+                  value={mpPixData.copyPasteCode} 
+                  className="bg-white/80 p-2 border border-gray-200 rounded-lg text-[9px] font-mono w-full truncate text-ocean focus:outline-none"
+                />
+                <button 
+                  onClick={() => {
+                    navigator.clipboard.writeText(mpPixData.copyPasteCode);
+                    alert("Copia e Cola copiado para a Área de Transferência!");
+                  }}
+                  className="px-3 bg-ocean text-white font-bold rounded-lg hover:bg-slate-900 cursor-pointer flex items-center justify-center"
+                  title="Copiar Pix"
+                >
+                  Copiar
+                </button>
+              </div>
+            </div>
+
+            {/* Confirmation simulator triggers */}
+            <button
+              onClick={handleConfirmPixPayment}
+              className="w-full py-3 bg-[#009EE3] hover:bg-[#007ebb] text-white text-xs font-bold rounded-xl flex justify-center items-center gap-2 shadow-sm transition-all cursor-pointer"
+            >
+              <Check className="h-4 w-4" />
+              Simular Confirmação Pix (Mercado Pago)
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== 3. EMAIL NOTIFICATIONS SIMULATED MAILBOX ==================== */}
+      {emailLogsOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-end backdrop-blur-sm bg-slate-950/20">
+          <div className="bg-white w-full max-w-md h-full shadow-2xl p-6 overflow-y-auto space-y-6 flex flex-col justify-between text-xs text-ocean">
+            <div className="space-y-4">
+              <div className="flex justify-between items-center border-b pb-4">
+                <div>
+                  <h3 className="font-display font-medium text-lg text-ocean flex items-center gap-1.5">
+                    <HelpCircle className="h-5 w-5 text-turquoise" />
+                    SMTP Outbound Notification Log
+                  </h3>
+                  <p className="text-[10px] text-gray-400 mt-0.5">Monitor legal notifications and digital signatures alerts in real-time.</p>
+                </div>
+                <button 
+                  onClick={() => setEmailLogsOpen(false)}
+                  className="text-gray-400 hover:text-ocean text-sm font-bold h-8 w-8 rounded-full border bg-slate-50 flex items-center justify-center cursor-pointer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* Emails loop logs list */}
+              <div className="space-y-4 max-h-[70vh] overflow-y-auto pr-1">
+                {activeOutboundEmails.length === 0 ? (
+                  <div className="p-8 text-center text-gray-400">
+                    <p className="font-mono text-xs">Waiting for outbound server messages...</p>
+                    <p className="text-[10px] mt-1 text-gray-300">Register accounts or trigger PIX payments to test transaction alerts.</p>
+                  </div>
+                ) : (
+                  activeOutboundEmails.map((ml, idx) => (
+                    <div key={idx} className="p-3 bg-slate-50 rounded-xl border border-gray-150 space-y-1.5 relative hover:border-turquoise/30 transition-all">
+                      <span className="absolute top-2.5 right-3 text-[8px] font-mono text-gray-400">
+                        {new Date(ml.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      </span>
+                      
+                      <div className="text-[10px]">
+                        <span className="font-bold text-turquoise uppercase tracking-wide">Recipient: </span>
+                        <strong className="text-ocean">{ml.to}</strong>
+                      </div>
+
+                      <div className="font-bold text-xs text-ocean pr-10">Subject: {ml.subject}</div>
+
+                      <div className="p-2.5 bg-white/60 border border-gray-200/50 rounded-lg text-[10px] text-gray-500 overflow-x-auto leading-relaxed max-h-[120px] overflow-y-auto">
+                        {/* Safely inject content HTML since it's sandbox safe from our api */}
+                        <div dangerouslySetInnerHTML={{ __html: ml.body }} />
+                      </div>
+                      
+                      <div className="flex justify-between items-center text-[9px] font-semibold text-emerald-600 pt-0.5 bg-emerald-50 px-2 py-0.5 rounded">
+                        <span>● SMTP simulated status</span>
+                        <span>{ml.status}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {/* Clear option */}
+            <div className="border-t pt-4">
+              <button 
+                onClick={async () => {
+                  alert("No sandbox reset active. Outbound logs reset when development server reboots.");
+                }}
+                className="w-full py-2 bg-slate-100 hover:bg-slate-200 text-gray-500 font-bold rounded-lg text-center cursor-pointer transition-all"
+              >
+                Reset Outbound Server Cache
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

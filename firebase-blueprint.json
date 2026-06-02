@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account data and role identification for MyClubPrime",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "name": { "type": "string" },
+        "avatar": { "type": "string" },
+        "role": { "type": "string", "enum": ["Guest", "Host", "Creator", "Concierge", "Administrator"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "email", "name", "role"]
+    },
+    "Property": {
+      "title": "Property Listing",
+      "description": "Premium glass beachfront properties listed on MyClubPrime CearáCoast",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "tagline": { "type": "string" },
+        "location": { "type": "string" },
+        "region": { "type": "string", "enum": ["Jericoacoara", "Cumbuco", "Fortaleza"] },
+        "pricePerNightUSD": { "type": "integer" },
+        "pricePerNightUSDT": { "type": "integer" },
+        "pricePerNightPIX": { "type": "integer" },
+        "rating": { "type": "number" },
+        "reviewsCount": { "type": "integer" },
+        "bedrooms": { "type": "integer" },
+        "bathrooms": { "type": "number" },
+        "maxGuests": { "type": "integer" },
+        "amenities": { "type": "array" },
+        "imageUrl": { "type": "string" },
+        "galleryUrls": { "type": "array" },
+        "latitude": { "type": "number" },
+        "longitude": { "type": "number" },
+        "description": { "type": "string" },
+        "hostId": { "type": "string" },
+        "hostName": { "type": "string" },
+        "hostAvatar": { "type": "string" },
+        "has360Tour": { "type": "boolean" },
+        "virtualTourModelUrl": { "type": "string" },
+        "isBeachfront": { "type": "boolean" },
+        "isLuxury": { "type": "boolean" },
+        "hasPool": { "type": "boolean" },
+        "isPetFriendly": { "type": "boolean" },
+        "isRemoteWorkFriendly": { "type": "boolean" },
+        "isFamilyFriendly": { "type": "boolean" },
+        "isCouplesFriendly": { "type": "boolean" }
+      },
+      "required": ["id", "name", "location", "region", "pricePerNightUSD", "hostId", "hostName"]
+    },
+    "Booking": {
+      "title": "Reservation Registry",
+      "description": "Persistent accommodation bookings with safe Escrow or Pix status tracking",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "propertyId": { "type": "string" },
+        "propertyName": { "type": "string" },
+        "propertyImage": { "type": "string" },
+        "guestId": { "type": "string" },
+        "guestName": { "type": "string" },
+        "hostId": { "type": "string" },
+        "checkIn": { "type": "string", "format": "date" },
+        "checkOut": { "type": "string", "format": "date" },
+        "totalAmountUSD": { "type": "integer" },
+        "totalAmountFiatBRL": { "type": "integer" },
+        "paymentMethod": { "type": "string", "enum": ["PIX", "Credit Card", "USDT Polygon"] },
+        "paymentStatus": { "type": "string", "enum": ["Pending", "Paid", "Escrow_Locked", "Released", "Disputed"] },
+        "escrowStatus": { "type": "string", "enum": ["Inactive", "Locked", "Progressive_Released", "Fully_Released", "Refunded", "In_Arbitration"] },
+        "securityGuaranteeStamp": { "type": "string" },
+        "blockchainTxHash": { "type": "string" },
+        "checkInQrCode": { "type": "string" },
+        "disputeNotes": { "type": "string" },
+        "hasActiveDispute": { "type": "boolean" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "propertyId", "guestId", "checkIn", "checkOut", "paymentMethod", "paymentStatus"]
+    },
+    "CreatorCampaign": {
+      "title": "Creator Campaign",
+      "description": "Influencer marketing stays and requirements for social coverage amplification",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "propertyName": { "type": "string" },
+        "region": { "type": "string" },
+        "rewardType": { "type": "string" },
+        "requirements": { "type": "string" },
+        "compensationAmountUSD": { "type": "number" },
+        "spotsLeft": { "type": "integer" },
+        "applicantsCount": { "type": "integer" }
+      },
+      "required": ["id", "propertyName", "rewardType", "requirements"]
+    },
+    "ConciergeTicket": {
+      "title": "Concierge Ticket",
+      "description": "On-demand resort concierge guest request tickets",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "guestName": { "type": "string" },
+        "propertyName": { "type": "string" },
+        "issueType": { "type": "string", "enum": ["Check-in Assist", "Custom Transfers Request", "Dispute Resolution", "Water Sports Rental", "Emergency Action"] },
+        "priority": { "type": "string", "enum": ["Low", "Medium", "High", "Critical"] },
+        "status": { "type": "string", "enum": ["Open", "Assigned", "Resolved"] },
+        "description": { "type": "string" },
+        "timestamp": { "type": "string" }
+      },
+      "required": ["id", "guestName", "propertyName", "issueType", "status"]
+    },
+    "LegalTermVersion": {
+      "title": "Legal Terms",
+      "description": "Terms of service and property compliance signatures logged on-chain",
+      "type": "object",
+      "properties": {
+        "version": { "type": "string" },
+        "updatedAt": { "type": "string" },
+        "signatureCount": { "type": "integer" },
+        "ipfsHash": { "type": "string" },
+        "status": { "type": "string", "enum": ["Active", "Archived"] }
+      },
+      "required": ["version", "ipfsHash", "status"]
+    }
+  },
+  "firestore": {
+    "users": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Collection of user security profiles"
+    },
+    "properties": {
+      "schema": { "$ref": "#/entities/Property" },
+      "description": "Collection of available luxury glass properties"
+    },
+    "bookings": {
+      "schema": { "$ref": "#/entities/Booking" },
+      "description": "Collection of real-time persistent guest accommodation bookings"
+    },
+    "campaigns": {
+      "schema": { "$ref": "#/entities/CreatorCampaign" },
+      "description": "Collection of ongoing social ambassador campaigns"
+    },
+    "tickets": {
+      "schema": { "$ref": "#/entities/ConciergeTicket" },
+      "description": "Collection of critical hospitality concierge tickets"
+    },
+    "legal": {
+      "schema": { "$ref": "#/entities/LegalTermVersion" },
+      "description": "Registry database of regulatory IPFS compliance layouts"
+    }
+  }
+}

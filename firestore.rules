@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (default-deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Common helper primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Users Collection Checks
+    match /users/{userId} {
+      allow get: if isSignedIn() && (isOwner(userId) || existing().role == 'Administrator');
+      allow list: if isSignedIn() && resource.data.id == request.auth.uid;
+      allow create: if isSignedIn() && isOwner(userId) && 
+        incoming().keys().hasAll(['id', 'email', 'name', 'role', 'createdAt']) &&
+        incoming().keys().size() == 5 &&
+        incoming().id == request.auth.uid &&
+        incoming().role in ['Guest', 'Host', 'Creator', 'Concierge', 'Administrator'] &&
+        incoming().email is string && incoming().email.size() <= 150;
+      allow update: if isSignedIn() && isOwner(userId) &&
+        incoming().role == existing().role && // Prevent self-elevating privileges
+        incoming().diff(existing()).affectedKeys().hasOnly(['name', 'avatar']);
+      allow delete: if false; // Users cannot be deleted from frontend
+    }
+
+    // Properties Collection Checks
+    match /properties/{propertyId} {
+      allow get: if true; // Publicly readable for browsing
+      allow list: if true; // Publicly queryable for browsing
+      allow create: if isSignedIn() &&
+        incoming().keys().hasAll(['id', 'name', 'location', 'region', 'pricePerNightUSD', 'hostId', 'hostName']) &&
+        isValidId(propertyId) &&
+        incoming().hostId == request.auth.uid &&
+        incoming().name is string && incoming().name.size() <= 150 &&
+        incoming().pricePerNightUSD is int && incoming().pricePerNightUSD > 0;
+      allow update: if isSignedIn() && existing().hostId == request.auth.uid &&
+        incoming().hostId == existing().hostId &&
+        incoming().diff(existing()).affectedKeys().hasAny(['name', 'tagline', 'location', 'region', 'pricePerNightUSD', 'pricePerNightUSDT', 'pricePerNightPIX', 'description', 'virtualTourModelUrl', 'imageUrl', 'galleryUrls', 'bedrooms', 'bathrooms', 'maxGuests', 'amenities', 'has360Tour', 'isBeachfront', 'isLuxury', 'hasPool', 'isPetFriendly', 'isRemoteWorkFriendly', 'isFamilyFriendly', 'isCouplesFriendly']);
+      allow delete: if isSignedIn() && existing().hostId == request.auth.uid;
+    }
+
+    // Bookings Collection Checks
+    match /bookings/{bookingId} {
+      allow get: if isSignedIn() && (
+        resource.data.guestId == request.auth.uid || 
+        resource.data.hostId == request.auth.uid || 
+        resource.data.paymentStatus == 'Escrow_Locked' || 
+        resource.data.paymentStatus == 'Paid' ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'leviethereum@gmail.com')
+      );
+      allow list: if isSignedIn() && (
+        resource.data.guestId == request.auth.uid || 
+        resource.data.hostId == request.auth.uid ||
+        (request.auth.token.email_verified == true && request.auth.token.email == 'leviethereum@gmail.com')
+      );
+      allow create: if isSignedIn() &&
+        incoming().guestId == request.auth.uid &&
+        incoming().keys().hasAll(['id', 'propertyId', 'propertyName', 'guestId', 'guestName', 'hostId', 'checkIn', 'checkOut', 'totalAmountUSD', 'paymentMethod', 'paymentStatus']) &&
+        incoming().totalAmountUSD is int && incoming().totalAmountUSD > 0;
+      allow update: if isSignedIn() && (
+        // Admin Override
+        (request.auth.token.email_verified == true && request.auth.token.email == 'leviethereum@gmail.com') ||
+        // Allow guest to raise dispute or change dispute details
+        (existing().guestId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['hasActiveDispute', 'disputeNotes', 'paymentStatus', 'escrowStatus'])) ||
+        // Allow host to release escrow or modify booking status
+        (existing().hostId == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['paymentStatus', 'escrowStatus']))
+      );
+      allow delete: if false; // Bookings cannot be deleted
+    }
+
+    // Campaigns Collection Checks
+    match /campaigns/{campaignId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+
+    // Tickets Collection Checks
+    match /tickets/{ticketId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+
+    // Legal Registry Checks
+    match /legal/{versionId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+  }
+}
